@@ -73,6 +73,13 @@ py -3 mcp_server.py          # 直接以 stdio 启动
 
 重载 MCP 后应先调用 `discover_sessions`，确认能看到目标 FracMan 窗口。
 
+## 配套 Skill
+
+仓库内的 [`skills/fracman-skill`](skills/fracman-skill/SKILL.md) 是配合本 MCP 使用的
+操作技能，整理了实测的宏调试经验、DFN 配方、GUI 自动化细节与排错决策树。把整个
+`skills/fracman-skill/` 目录复制到 `%USERPROFILE%\.qoder\skills\`（或项目的
+`.qoder/skills/`）后，重启会话即可通过 `/fracman-skill` 调用。
+
 ## 工具
 
 **配置与会话**
@@ -163,6 +170,7 @@ py -3 mcp_server.py          # 直接以 stdio 启动
 | --- | --- |
 | 会话发现 | 识别 PID 48136，状态“准备好” |
 | 实时宏成功 | `SetSeed 424242` 完成，返回日志增量 |
+| 实时静默宏 | `SetCurrentUnits Length m` 6.3 s 完成；`.fml` 末尾出现 `RunMacro` 哨兵 |
 | 实时宏错误 | `Units = "bogusunit"` → `macro_error`，自动关闭“确定”框，`ping` 恢复 |
 | 批次 DFN | 60 条裂缝 8.58 s，产物 23,959 B |
 | 批次并发 | 2 实例 13.35 s 成功；第 3 个被 `BatchBusy (2/2)` 拒绝 |
@@ -170,16 +178,23 @@ py -3 mcp_server.py          # 直接以 stdio 启动
 | 取消/超时 | `cancel_run` 2 s 内终止；`timeout=4` 返回 `timeout` |
 | 解析器 | 200 裂缝 FAB（57,841.9 m²）、158 裂缝 FFB、12 段 F2D（16,537.854）、386 点 SAB（8,942.8） |
 | 工程生命周期 | Exercise 12e 副本打开 → 截图 → 关闭（“保存？”答“否”）；PID 48136 不受影响 |
-| 截图 | 整窗 2880×1523；3D 视图裁剪 2198×1224 |
-| 单元测试 | `38 passed` |
+| 实时 DFN | 1 km×1 km×500 m、80 条裂缝；FAB 32,295 B，面积均值 29,697.96 m² |
+| 截图 | 屏幕抓取整窗 2880×1523；3D 视图裁剪 1892×1224；`capture_method=screen` |
+| 单元测试 | `43 passed` |
 
 ## 已知限制
 
-- 实时宏一次调用约 15–19 s，主要耗时为 UIA 控件树扫描与日志读取。
+- 实时宏一次调用约 6–19 s，主要耗时为 UIA 控件树扫描、日志轮询与对话框处理。
 - UIA 日志面板上限 4096 字符；服务器用重叠匹配还原增量，但更早的历史不可见。
 - `.frd` 是未公开的二进制容器，只提供横幅/对象名启发式信息；数值请通过宏导出或在
   GUI 中查看。
 - 错误行号来自 FracMan 实际执行的包装后宏，可能比用户原文多 5 行左右。
+- 截图会先把 FracMan 窗口激活到前台，再抓取物理像素；窗口被其他窗口遮挡时无法
+  避免（`PrintWindow` 对 GPU 视图会返回旧帧，仅作后备）。
+- 实时宏完成时会自动关闭信息类对话框，文本记入 `warnings`；只有含
+  error/invalid/failed 等字样的对话框才判失败。
+- 完成判定依赖包装宏末尾的 `RunMacro` 空哨兵；`STOP` 会在哨兵前终止宏，因此实时宏
+  拒绝 `STOP`（批处理不受影响）。
 - 不提供 `generate_dfn` / `run_welltest` 之类高层封装；Phase 1 交付宏模板与底层工具。
 - 仅支持 Windows GUI 会话；无远程 HTTP 模式。
 
@@ -193,6 +208,9 @@ MCP/FracMan/
     parsers/ (common fab f2d sab fml frd)
     resources/ (agent_instructions.md macro_reference.md templates/dfn_generate.fmf)
   tests/
+  skills/fracman-skill/
+    SKILL.md
+    references/ (macro-cookbook.md gui-automation.md troubleshooting.md)
   examples/mcp_config.example.json
   docs/superpowers/specs/2026-10-31-fracman-mcp-design.md
   README.md  pyproject.toml

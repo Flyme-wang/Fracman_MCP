@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "fracman-mcp-server": {
+      "command": "C:\\Users\\Dell\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+      "args": [
+        "d:\\智能体-260424\\qoder\\CAE-Agent-Hub\\MCP\\FracMan\\mcp_server.py"
+      ],
+      "cwd": "d:\\智能体-260424\\qoder\\CAE-Agent-Hub\\MCP\\FracMan",
+      "env": {
+        "FRACMAN_EXE": "D:\\software\\fracman\\FracMan.exe",
+        "FRACMAN_MCP_WORKSPACE": "C:\\Users\\Dell\\AppData\\Local\\FracManMCP",
+        "FRACMAN_MCP_MAX_BATCH": "2"
+      }
+    }
+  }
+}

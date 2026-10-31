@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fracman-mcp"
+version = "0.1.0"
+description = "Local MCP server that lets an AI agent drive FracMan 8.0 through live GUI macros, hidden batch runs and result-file parsing."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "CAE-Agent-Hub" }]
+dependencies = [
+    "mcp>=1.0",
+    "pywinauto>=0.6.8",
+    "pywin32>=306",
+    "psutil>=5.9",
+    "Pillow>=10.0",
+]
+
+[project.scripts]
+fracman-mcp = "mcp_server:main"
+
+[tool.setuptools]
+py-modules = ["mcp_server"]
+
+[tool.setuptools.packages.find]
+include = ["fracman_mcp*"]
+
+[tool.setuptools.package-data]
+fracman_mcp = ["resources/*.md", "resources/templates/*.fmf"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

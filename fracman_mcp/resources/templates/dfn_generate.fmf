@@ -1,0 +1,55 @@
+# FracMan MCP DFN template (verified command forms).
+# Placeholders use __NAME__; see fracman_mcp.macro.dfn_template.
+# The server wraps this file with LOGTOFILE / EXITONERROR and EXIT.
+
+BEGIN SetSeed
+Seed = __SEED__
+END
+
+BEGIN SetCurrentUnits
+Value = "Length"
+Units = "m"
+END
+
+BEGIN CREATEREGION
+ObjectName = "MCP_Box"
+Type = "Box"
+Center = 0, 0, 0
+Size = __SX__, __SY__, __SZ__
+END
+
+BEGIN DefineFractureSetDefinition
+DefinitionName = "MCP_Def"
+FractureModel = "REGION"
+RegionName = "MCP_Box"
+ClipToRegion = 1
+UseSurfacePoints = 0
+Count = __COUNT__
+AdjustedByTruncation = 0
+UsePole = 1
+BEGIN OrientationDistribution
+Type = "FISHER"
+Parameter "Mean Trend" = __TREND__
+Parameter "Mean Plunge" = __PLUNGE__
+Parameter "Concentration" = __KAPPA__
+END
+BEGIN SizeDistribution
+ValueType "Length" Units "m"
+Type = "UNIFORM"
+Parameter "Mean" = __SIZE__
+Parameter "Deviation" = __DEV__
+END
+NumSides = 5
+Termination = 0
+END
+
+BEGIN GenerateFractureSet
+DefinitionName = "MCP_Def"
+FractureSetName = "MCP_Set"
+END
+
+BEGIN ExportFile
+Path = "__EXPORT__"
+TypeName = "FAB"
+Object = "MCP_Set"
+END

@@ -59,7 +59,7 @@ Get-ChildItem "<run_dir>"
 ### 3.3 截图旧帧
 
 - 现象：整窗 2880×1523 的截图里，3D 视图内容只有约 66% 大小，周围黑边，且是旧画面。
-- 证据：`capture_method=printwindow`；UIA 视图矩形本身正确（750,644–2642,1868）。
+- 证据：`capture_method=printwindow`；UIA 读到的视图矩形与窗口客户区一致，说明裁剪坐标没错。
 - 根因：`PrintWindow` 对 GPU 渲染视图返回旧窗口尺寸的缓存帧。
 - 修复：激活窗口后 `ImageGrab` 屏幕抓取；`PrintWindow` 仅后备。
 - 验证：`capture_method=screen`，裂缝与黄色区域框完整可见。

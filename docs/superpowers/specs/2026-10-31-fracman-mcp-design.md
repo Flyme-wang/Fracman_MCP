@@ -31,6 +31,9 @@ FracMan 8.00 没有官方 Python/COM/命令行 API。可用的自动化接口只
 
 - 按 PID 附着 FracMan 主窗口，不依赖端口。
 - `run_macro` 将用户宏包装为带 `LOGTOFILE` 的临时 `.fmf`，通过“运行 宏...”执行；轮询日志面板、状态栏与模态框。
+- 完成判据：包装宏末尾追加 `RunMacro` 空哨兵（`.fml` 会记录 `#Running Macro:` 与 `RunMacro` 块）；
+  轮询 `.fml` 直到哨兵路径出现。`DrawingOn/DrawingOff` 只在回放时生效、不写入日志，不能用作哨兵。
+  实时宏因此拒绝 `STOP`（它会在哨兵前终止宏）；出错时 `.fml` 的 `#Macro Error` 立即判失败。
 - 检测到错误框时保存文本并点“确定”；超时返回 `timeout_pending`，由后台 watcher 继续完成，绝不自动重放。
 - 支持打开工程副本（新进程）、截图、关闭 MCP 自建会话。
 
@@ -72,6 +75,8 @@ FracMan 8.00 没有官方 Python/COM/命令行 API。可用的自动化接口只
 ## 5. 错误与超时语义
 
 - 实时宏：BUSY 返回当前 `active_request_id`；超时返回 `timeout_pending`；未知结果不视为未执行；不自动重放。
+  成功判据为 `.fml` 无 `#Macro Error` 且日志非空；自动关闭的信息框记入 `warnings`，
+  只有对话框文本含 error/invalid/failed 等失败语义时才判失败。
 - 批处理：`EXITONERROR` 保证错误时不挂死；`.fml` 是唯一可靠判错来源；退出码忽略。
 - 模态框：任务对话框读 `ContentText`；经典消息框读 Static `65535`；默认只点“确定”；关闭时
   `save=false` 点“否”，仅当调用方显式 `save=true` 才点“是”。
@@ -111,11 +116,15 @@ MCP/FracMan/
    返回 `timeout`。
 4. `inspect_file`：200 裂缝 FAB（5 属性、57,841.9 m²）、158 裂缝 FFB（3 属性）、
    F2D 12 段（16,537.854）、SAB 386 点（8,942.8）；FRD 返回横幅与启发式对象名。
-5. `capture_window` 整窗 2880×1523；`mode=view` 裁剪 2198×1224，`view_cropped=true`。
+5. `capture_window` 整窗 2880×1523；`mode=view` 裁剪 1892×1224，`view_cropped=true`，
+   `capture_method=screen`（GPU 视图改用屏幕物理像素抓取）。
 6. 打开 Exercise 12e 副本（88,917 B）→ 截图 → `close_session(save=False)` 自动答“否”；
    PID 48136 始终存活，MCP 自有进程全部退出。
 7. 培训资料未修改；仅读取样例做解析回归。
-8. `py -3 -m pytest tests -q` → 38 passed；stdio 客户端验证 21 个工具、4 个资源。
+8. `py -3 -m pytest tests -q` → 43 passed；stdio 客户端验证 21 个工具、4 个资源。
+9. 实时 DFN：1 km×1 km×500 m、80 条裂缝（FISHER trend 15°/plunge 85°/κ=8，
+   UNIFORM 长度 100±40 m）；FAB 32,295 B，面积均值 29,697.96 m²，总 2,375,836.46 m²；
+   3D 视图关闭区域实体后显示全部裂缝。
 
 ## 9. 非目标
 
@@ -126,7 +135,11 @@ MCP/FracMan/
 
 ## 10. 已知限制
 
-- 实时宏单次调用约 15–19 s，主要耗时为 UIA 控件扫描与日志读取。
+- 实时宏单次调用约 6–19 s，主要耗时为 UIA 控件扫描、日志轮询与对话框处理。
 - UIA 日志面板上限 4096 字符，增量用重叠匹配还原；更早历史不可见。
 - 错误行号对应服务器包装后的宏，比用户原文多约 5 行。
+- 截图会激活 FracMan 到前台并抓取屏幕物理像素；窗口被遮挡时无法避免。
+  `PrintWindow` 对 GPU 视图返回旧帧，仅作后备。
+- 实时宏完成时自动关闭的信息框记入 `warnings`；仅含 error/invalid/failed
+  等字样或 `.fml` 有 `#Macro Error` 时判失败。
 - 仅 Windows + 本机 GUI；无 HTTP/远程模式。

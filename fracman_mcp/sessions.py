@@ -13,7 +13,9 @@ from typing import Any
 from . import gui
 from .config import settings
 from .macro import (
+    LIVE_SENTINEL_NAME,
     MacroValidationError,
+    live_sentinel_text,
     new_run_dir,
     read_macro,
     validate,
@@ -303,7 +305,9 @@ class SessionManager:
         run_dir = new_run_dir("live")
         macro_path = run_dir / "macro.fmf"
         fml_path = run_dir / "run.fml"
-        wrapped = wrap_live(code, fml_path)
+        sentinel_path = run_dir / LIVE_SENTINEL_NAME
+        write_macro(sentinel_path, live_sentinel_text())
+        wrapped = wrap_live(code, fml_path, sentinel_path)
         write_macro(macro_path, wrapped)
         record, _created = requests_registry.admit(
             request_id,
@@ -328,6 +332,7 @@ class SessionManager:
                     w,
                     macro_path=macro_path,
                     fml_path=fml_path,
+                    sentinel_path=sentinel_path,
                 )
                 if result.get("ok"):
                     requests_registry.complete(
@@ -376,6 +381,11 @@ class SessionManager:
             final = record
         data = final.to_dict()
         data["ok"] = final.status == "completed"
+        # Lift the worker's payload (errors, warnings, elapsed_seconds,
+        # fml_tail, dialogs) so callers do not have to dig into result.
+        if isinstance(final.result, dict):
+            for key, value in final.result.items():
+                data.setdefault(key, value)
         try:
             w = gui.connect(session.pid, session.hwnd)
             data["ready"] = gui.is_ready(w=w)

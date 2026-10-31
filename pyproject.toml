@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fracman-mcp"
-version = "0.1.0"
+version = "0.1.1"
 description = "Local MCP server that lets an AI agent drive FracMan 8.0 through live GUI macros, hidden batch runs and result-file parsing."
 readme = "README.md"
 requires-python = ">=3.10"

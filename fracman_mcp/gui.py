@@ -16,13 +16,15 @@ from pathlib import Path
 from typing import Any
 
 import psutil
+import win32api
 import win32con
 import win32gui
 import win32process
 import win32ui
-from PIL import Image
+from PIL import Image, ImageGrab
 from pywinauto import Application, Desktop
 from pywinauto.keyboard import send_keys
+
 
 USER32 = ctypes.windll.user32
 USER32.SetProcessDPIAware()
@@ -567,11 +569,48 @@ def _parse_fml_errors(text: str) -> list[str]:
     return errors
 
 
+_ERROR_DIALOG_TOKENS = (
+    "error",
+    "错误",
+    "invalid",
+    "无效",
+    "failed",
+    "失败",
+    "cannot",
+    "无法",
+    "not found",
+    "找不到",
+)
+
+
+def _dialog_error_text(dialogs: list[dict[str, Any]]) -> list[str]:
+    """Return dialog texts that look like genuine failures, not progress/info."""
+    hits: list[str] = []
+    for payload in dialogs:
+        text = f"{payload.get('title', '')} {payload.get('text', '')}".lower()
+        if any(token in text for token in _ERROR_DIALOG_TOKENS):
+            hits.append(payload.get("text") or payload.get("title") or "")
+    return hits
+
+
+def _fml_finished(text: str, sentinel_path: str | Path) -> bool:
+    """True when the live wrapper's trailing RunMacro sentinel was executed.
+
+    FracMan writes ``#Running Macro: <path>`` and the RunMacro block to the
+    .fml log, which makes the path a reliable end marker for silent macros.
+    """
+    needle = str(sentinel_path).replace("\\", "/").casefold()
+    if not needle:
+        return False
+    return needle in text.replace("\\", "/").casefold()
+
+
 def execute_live_macro(
     w: Any,
     *,
     macro_path: str | Path,
     fml_path: str | Path,
+    sentinel_path: str | Path,
     hard_timeout: float = 6 * 3600,
     poll_interval: float = 0.25,
 ) -> dict[str, Any]:
@@ -601,7 +640,6 @@ def execute_live_macro(
     _submit_file_dialog(w, dialog, str(macro_path))
 
     seen_dialogs: list[dict[str, Any]] = []
-    saw_busy = False
     after_log = before_log
     last_status = ""
     deadline = submitted_at + hard_timeout
@@ -632,26 +670,41 @@ def execute_live_macro(
             seen_dialogs.append(payload)
         status = read_status(w)
         last_status = status
-        if not is_ready(status):
-            saw_busy = True
         after_log = read_log(w)
+        fml_text = _read_text_with_retry(fml_path, attempts=1)
+        fml_errors = _parse_fml_errors(fml_text)
         file_dialogs = [
             payload
             for payload in get_dialogs(w, deep=True)
             if payload["kind"] == "file_dialog"
         ]
+        if fml_errors and not file_dialogs and is_ready(status):
+            dialog_errors = _dialog_error_text(seen_dialogs)
+            errors = fml_errors + [f"dialog: {text}" for text in dialog_errors]
+            return {
+                "ok": False,
+                "status": "macro_error",
+                "elapsed_seconds": round(time.time() - submitted_at, 2),
+                "macro_path": str(macro_path),
+                "fml_path": str(fml_path),
+                "log_delta": _log_delta(before_log, after_log),
+                "errors": errors,
+                "dialogs": seen_dialogs,
+                "fml_tail": fml_text[-4000:],
+            }
         if (
             not file_dialogs
             and is_ready(status)
-            and after_log != before_log
-            and (saw_busy or time.time() - submitted_at > 1.0)
+            and _fml_finished(fml_text, sentinel_path)
         ):
             elapsed = time.time() - submitted_at
-            fml_text = _read_text_with_retry(fml_path)
-            errors = _parse_fml_errors(fml_text)
+            errors = fml_errors
+            dialog_errors = _dialog_error_text(seen_dialogs)
+            errors.extend(f"dialog: {text}" for text in dialog_errors)
+            ok = not errors and bool(fml_text.strip())
             return {
-                "ok": not errors and not seen_dialogs and bool(fml_text.strip()),
-                "status": "completed" if not errors and fml_text.strip() else (
+                "ok": ok,
+                "status": "completed" if ok else (
                     "macro_error" if errors else "no_log"
                 ),
                 "elapsed_seconds": round(elapsed, 2),
@@ -660,6 +713,11 @@ def execute_live_macro(
                 "log_delta": _log_delta(before_log, after_log),
                 "errors": errors,
                 "dialogs": seen_dialogs,
+                "warnings": [
+                    payload.get("text", "")
+                    for payload in seen_dialogs
+                    if payload.get("text") not in dialog_errors
+                ],
                 "fml_tail": fml_text[-4000:],
             }
         if time.time() - submitted_at > 8.0 and file_dialogs:
@@ -744,6 +802,49 @@ def _print_window_image(hwnd: int) -> Image.Image:
         win32gui.ReleaseDC(hwnd, hwnd_dc)
 
 
+def _activate_window(hwnd: int, wrapper: Any | None = None) -> bool:
+    """Bring the window to the foreground; return whether that succeeded."""
+    try:
+        if win32gui.IsIconic(hwnd):
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+    except Exception:
+        pass
+    if wrapper is not None:
+        try:
+            wrapper.set_focus()
+        except Exception:
+            pass
+    for _ in range(3):
+        try:
+            win32gui.BringWindowToTop(hwnd)
+            win32gui.SetForegroundWindow(hwnd)
+        except Exception:
+            pass
+        time.sleep(0.15)
+        try:
+            if win32gui.GetForegroundWindow() == hwnd:
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _screen_grab(rect: tuple[int, int, int, int]) -> Image.Image:
+    """Copy pixels from the desktop (physical coordinates, all monitors)."""
+    left, top, right, bottom = rect
+    vx = win32api.GetSystemMetrics(win32con.SM_XVIRTUALSCREEN)
+    vy = win32api.GetSystemMetrics(win32con.SM_YVIRTUALSCREEN)
+    shot = ImageGrab.grab(all_screens=True)
+    return shot.crop((left - vx, top - vy, right - vx, bottom - vy))
+
+
+def _image_is_blank(image: Image.Image, threshold: int = 6) -> bool:
+    """True for an all-black/noise-free capture (PrintWindow failure mode)."""
+    small = image.convert("L").resize((32, 32))
+    values = small.tobytes()
+    return max(values) - min(values) < threshold
+
+
 def capture_window(
     w: Any,
     hwnd: int,
@@ -751,7 +852,27 @@ def capture_window(
     out_path: str | Path,
     mode: str = "full",
 ) -> dict[str, Any]:
-    image = _print_window_image(hwnd)
+    """Capture the window.
+
+    The 3D view is GPU-rendered, and ``PrintWindow`` frequently returns a stale
+    frame from an older window size (black padding, wrong crop).  Prefer a
+    physical-pixel desktop grab after bringing FracMan to the foreground and
+    keep ``PrintWindow`` only as a fallback for occluded/hidden windows.
+    """
+    activated = _activate_window(hwnd, w)
+    left, top, right, bottom = window_rect(hwnd)
+    method = "screen"
+    image: Image.Image | None = None
+    if activated:
+        try:
+            candidate = _screen_grab((left, top, right, bottom))
+            if candidate.width > 20 and candidate.height > 20 and not _image_is_blank(candidate):
+                image = candidate
+        except Exception:
+            image = None
+    if image is None:
+        method = "printwindow"
+        image = _print_window_image(hwnd)
     uia_rect = w.rectangle()
     try:
         left, top, right, bottom = window_rect(hwnd)
@@ -782,6 +903,8 @@ def capture_window(
         "view_rect": view,
         "uia_window_rect": [uia_rect.left, uia_rect.top, uia_rect.right, uia_rect.bottom],
         "capture_scale": round(scale, 4),
+        "capture_method": method,
+        "activated": activated,
     }
 
 

@@ -105,3 +105,47 @@ def test_is_ready_variants():
     assert not gui.is_ready("")
     assert not gui.is_ready("正在运行")
     assert not gui.is_ready("未知")
+
+
+def test_dialog_error_text_ignores_progress_boxes():
+    info = [{"title": "FracMan", "text": "Fracture generation complete"}]
+    assert gui._dialog_error_text(info) == []
+    assert gui._dialog_error_text([{"title": "FracMan", "text": ""}]) == []
+
+
+def test_dialog_error_text_detects_error_boxes():
+    assert gui._dialog_error_text(
+        [{"title": "FracMan", "text": "Invalid value/unit specified"}]
+    )
+    assert gui._dialog_error_text([{"title": "FracMan", "text": "宏错误：文件未找到"}])
+    assert not gui._dialog_error_text(
+        [{"title": "FracMan", "text": "Export finished successfully"}]
+    )
+
+
+def test_image_is_blank_detects_dead_printwindow():
+    from PIL import Image
+
+    assert gui._image_is_blank(Image.new("RGB", (40, 40), (0, 0, 0)))
+    patterned = Image.new("RGB", (40, 40), (0, 0, 0))
+    patterned.putpixel((20, 20), (255, 255, 255))
+    assert not gui._image_is_blank(patterned)
+
+
+def test_fml_finished_detects_runmacro_sentinel():
+    sentinel = "C:/tmp/run/sentinel.fmf"
+    body = 'BEGIN SetCurrentUnits\nValue = "Length"\nUnits = "m"\nEND\n'
+    assert not gui._fml_finished(body, sentinel)
+    assert not gui._fml_finished("", sentinel)
+
+    done = (
+        body
+        + "#Running Macro: C:/tmp/run/sentinel.fmf\n"
+        + 'BEGIN RunMacro\n\tPath = "C:/tmp/run/sentinel.fmf"\nEND\n'
+    )
+    assert gui._fml_finished(done, sentinel)
+    assert gui._fml_finished(done.replace("C:/tmp", "C:\\tmp"), sentinel)
+    assert not gui._fml_finished(body, sentinel)
+    # A different sentinel path in the same run must not satisfy this run.
+    other = done.replace("sentinel.fmf", "other.fmf")
+    assert not gui._fml_finished(other, sentinel)

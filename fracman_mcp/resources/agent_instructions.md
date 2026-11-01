@@ -41,7 +41,10 @@ starts a WSL job and parses the JSON it leaves behind.
 3. `result.json` is the only reliable verdict. `errors` holds the traceback
    tail. `dfnworks_job_log` shows LaGriT output that never reaches stdout.
 4. Meshing is CPU-heavy; graph is fast. Ask before resubmitting a failed mesh
-   with different parameters — a `job_id` is immutable.
+   with different parameters — a `job_id` is immutable. Job records survive
+   server restarts (rebuilt from `<workspace>/dfnworks/jobs/<job_id>/`); a job
+   that never wrote `result.json` shows `interrupted` and can be resubmitted
+   with the same `job_id` and spec to continue in place.
 5. Defaults are scale-relative: `h = domain/50`, fracture radius `= domain/5`,
    three oblique constant families, `n_poly=100`. That combination was
    verified to percolate from `left` to `right` on 20 m, 100 m and 1 km cubes.

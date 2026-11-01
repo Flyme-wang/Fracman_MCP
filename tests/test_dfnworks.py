@@ -374,3 +374,64 @@ def test_runner_rejects_empty_spec():
         runner.submit("generate", None)  # type: ignore[arg-type]
     with pytest.raises(DfnError):
         runner.submit("generate", {}, job_id="  ")
+
+
+# -- restart recovery -------------------------------------------------------
+
+
+def test_runner_rehydrates_completed_job_from_disk(tmp_path):
+    runner = DfnJobRunner(command_builder=_stand_in_builder(tmp_path))
+    spec = build_spec("generate", seed=21)
+    first = runner.submit("generate", spec, job_id="dfn-restart-test", wait_seconds=60)
+    assert first["status"] == "completed", first
+
+    dfn_jobs_registry.forget("dfn-restart-test")
+    restarted = DfnJobRunner(command_builder=_stand_in_builder(tmp_path))
+    status = restarted.monitor("dfn-restart-test")
+    assert status["status"] == "completed", status
+    assert status["result"]["ok"] is True
+    names = {Path(item["path"]).name for item in status["artifacts"]}
+    assert "dfn_stats.json" in names
+    assert restarted.record("dfn-restart-test").spec_path == first["spec_path"]
+    assert "dfn-restart-test" in {item["job_id"] for item in restarted.list(limit=200)}
+
+    again = restarted.submit(
+        "generate", spec, job_id="dfn-restart-test", wait_seconds=5
+    )
+    assert again["status"] == "completed"
+    with pytest.raises(RequestConflict):
+        restarted.submit(
+            "generate", build_spec("generate", seed=22),
+            job_id="dfn-restart-test", wait_seconds=5,
+        )
+
+
+def test_runner_rehydrates_interrupted_job_and_reruns(tmp_path, monkeypatch):
+    from fracman_mcp.config import settings
+
+    monkeypatch.setattr(settings, "workspace", tmp_path / "ws")
+    spec = build_spec("generate", seed=31)
+    job_dir = settings.dfn_jobs_dir / "dfn-interrupted-test"
+    job_dir.mkdir(parents=True)
+    (job_dir / "spec.json").write_text(json.dumps(spec), encoding="utf-8")
+    (job_dir / "stdout.txt").write_text("partial run\n", encoding="utf-8")
+
+    runner = DfnJobRunner(command_builder=_stand_in_builder(tmp_path))
+    status = runner.monitor("dfn-interrupted-test")
+    assert status["status"] == "interrupted", status
+    assert status["stderr_path"].endswith("stderr.txt")
+
+    rerun = runner.submit(
+        "generate", spec, job_id="dfn-interrupted-test", wait_seconds=60
+    )
+    assert rerun["status"] == "completed", rerun
+    assert (job_dir / "result.json").is_file()
+
+
+def test_runner_unknown_job_id_is_not_found(tmp_path):
+    runner = DfnJobRunner(command_builder=_stand_in_builder(tmp_path))
+    with pytest.raises(KeyError):
+        runner.monitor("dfn-does-not-exist")
+    assert "dfn-does-not-exist" not in {
+        item["job_id"] for item in runner.list(limit=200)
+    }

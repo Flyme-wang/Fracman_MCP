@@ -101,7 +101,10 @@ dfnWorks 还要求每条矩形 family 的 4 点轮廓最短边 ≥ `3h`，即
 
 ## 判错与取消
 
-- `dfnworks_job_status` 的 `status`：`queued/running/completed/failed/timeout/cancelled`。
+- `dfnworks_job_status` 的 `status`：`queued/running/completed/failed/timeout/cancelled/interrupted`。
+- `interrupted` 表示服务器重启时该作业还没写出 `result.json`：用同一 `job_id`、同一
+  参数重提会在原目录续跑（旧的 `result.json` 会先被清掉）；其余状态跨重启会从
+  作业目录自动恢复，不需要记忆进程。
 - 驱动捕获 `SystemExit` 与异常并写入 `result.json`；`result.ok=false` 时查看
   `errors` 里的 traceback 尾部。
 - 超时只报告 `timeout`，不会自动重放；同一 `job_id` 用不同参数重提会被拒绝。

@@ -222,6 +222,13 @@ class RunRegistry:
             raise KeyError(f"unknown run_id: {run_id}")
         return record
 
+    def forget(self, run_id: str) -> None:
+        """Drop a record from memory; on-disk artifacts are left untouched."""
+        with self._lock:
+            self._runs.pop(run_id, None)
+            self._events.pop(run_id, None)
+            self._active_pids.pop(run_id, None)
+
     def wait(self, run_id: str, timeout: float = 0.0) -> RunRecord:
         record = self.find(run_id)
         if timeout > 0 and record.status in ("queued", "running"):

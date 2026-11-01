@@ -35,7 +35,7 @@ from fracman_mcp.dfnworks import (
 )
 from fracman_mcp.macro import MacroValidationError
 from fracman_mcp.parsers import SUPPORTED_SUFFIXES, inspect_file as inspect_file_impl
-from fracman_mcp.requests import dfn_jobs_registry, requests_registry, runs_registry
+from fracman_mcp.requests import requests_registry, runs_registry
 from fracman_mcp.runner import BatchBusy, BatchError, batch_runner
 from fracman_mcp.sessions import SessionNotFound, session_manager
 
@@ -331,9 +331,7 @@ async def list_runs(limit: int = 20) -> str:
 
 
 def _job_spec(job_id: str) -> dict[str, Any]:
-    record = dfn_jobs_registry.get(job_id)
-    if record is None:
-        raise KeyError(job_id)
+    record = dfn_runner.record(job_id)  # rehydrates from disk after a restart
     spec = json.loads(
         Path(record.spec_path).read_text(encoding="utf-8", errors="replace")
     )
@@ -408,8 +406,8 @@ async def dfnworks_generate(
 async def dfnworks_mesh(
     job_id: str,
     uniform_mesh: bool = True,
-    min_dist: float = 0.5,
-    max_dist: float = 10.0,
+    min_dist: float | None = None,
+    max_dist: float | None = None,
     max_resolution_factor: float = 10.0,
     new_job_id: str | None = None,
     timeout: float | None = None,
@@ -419,7 +417,9 @@ async def dfnworks_mesh(
 
     The source job's specification is reused, so the same seed reproduces the
     same DFN; the mesh and its statistics are written into the new job
-    directory. Meshing is CPU-heavy and typically the slowest stage.
+    directory. ``min_dist``/``max_dist`` default to ``h/4`` and ``5h`` where
+    ``h`` comes from the source job. Meshing is CPU-heavy and typically the
+    slowest stage.
     """
     base = await asyncio.to_thread(_job_spec, job_id)
     spec = await asyncio.to_thread(
@@ -502,10 +502,7 @@ async def dfnworks_compare(
         raise ValueError("provide exactly one of job_id or dfnworks_stats")
     source: str
     if job_id is not None:
-        record = dfn_jobs_registry.get(job_id)
-        if record is None:
-            raise KeyError(job_id)
-        source = record.workspace_dir
+        source = dfn_runner.record(job_id).workspace_dir
     else:
         source = str(dfnworks_stats)
     result = await asyncio.to_thread(
@@ -760,7 +757,7 @@ def runs_resource() -> str:
 @mcp.resource("fracman://dfnworks-jobs")
 def dfnworks_jobs_resource() -> str:
     """Recent dfnWorks jobs as JSON."""
-    return _json({"jobs": dfn_jobs_registry.list(limit=50)})
+    return _json({"jobs": dfn_runner.list(limit=50)})
 
 
 @mcp.resource("fracman://dfnworks-guide")

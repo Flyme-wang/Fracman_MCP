@@ -170,6 +170,9 @@ dfnworks_compare(r"C:\path\model.fab", job_id=gen["job_id"])
 ```
 
 `generate` / `mesh` / `graph` 三个阶段都用同一 seed 重建同一 DFN，`job_id` 是幂等键。
+服务器重启后，`dfnworks_job_status/log/list_jobs/compare` 与 `dfnworks_mesh/graph`
+会按 `<workspace>/dfnworks/jobs/<job_id>/` 从磁盘恢复作业记录；重启时未写出
+`result.json` 的作业标记为 `interrupted`，用同一 `job_id` 原参数重提即在原目录续跑。
 默认几何按域尺寸 `L` 缩放：`h = L/50`、裂缝半径 `= L/5`、三组斜交 constant family、
 `n_poly = 100`、网格 `min_dist = h/4`、`max_dist = 5h`。该组合在 20 m / 100 m / 1 km
 立方域上均实测得到 25 条裂缝、左右边界连通（网格 18,873 节点 / 35,214 三角形，

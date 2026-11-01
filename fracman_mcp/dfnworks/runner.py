@@ -15,6 +15,7 @@ import subprocess
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -138,13 +139,17 @@ class DfnJobRunner:
         if len(job_id) > 200:
             raise DfnError("job_id must be at most 200 characters")
 
-        existing = dfn_jobs_registry.get(job_id)
+        existing = self._record_or_none(job_id)
         if existing is not None:
             if existing.fingerprint and existing.fingerprint != digest:
                 raise RequestConflict(
                     f"job_id {job_id!r} already exists with a different payload"
                 )
-            return self._describe(existing)
+            if existing.status != "interrupted":
+                return self._describe(existing)
+            # A previous attempt lost its parent process: rerun it in the same
+            # directory so the caller keeps the job_id it already knows.
+            return self._rerun(existing, effective_timeout, label, wait_seconds)
 
         with self._lock:
             active = dfn_jobs_registry.count_active()
@@ -179,19 +184,146 @@ class DfnJobRunner:
             cancel_event = threading.Event()
             self._cancel[job_id] = cancel_event
 
+        return self._launch(job_id, effective_timeout, cancel_event, wait_seconds)
+
+    def _launch(
+        self,
+        job_id: str,
+        timeout: float,
+        cancel_event: threading.Event,
+        wait_seconds: float,
+    ) -> dict[str, Any]:
         worker = threading.Thread(
             target=self._execute,
-            args=(job_id, effective_timeout, cancel_event),
+            args=(job_id, timeout, cancel_event),
             name=f"dfnworks-{job_id}",
             daemon=True,
         )
         worker.start()
-
         if wait_seconds and wait_seconds > 0:
-            dfn_jobs_registry.wait(
-                job_id, min(float(wait_seconds), effective_timeout + 10.0)
+            dfn_jobs_registry.wait(job_id, min(float(wait_seconds), timeout + 10.0))
+        return self._describe(self._record(job_id))
+
+    def _rerun(
+        self,
+        record: DfnJobRecord,
+        timeout: float,
+        label: str,
+        wait_seconds: float,
+    ) -> dict[str, Any]:
+        """Rerun a job that was interrupted by a server restart."""
+        stale = Path(record.result_path)
+        try:
+            stale.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise DfnError(f"cannot clear stale result.json: {exc}") from exc
+        with self._lock:
+            dfn_jobs_registry.update(
+                record.job_id,
+                status="queued",
+                started_at=None,
+                finished_at=None,
+                returncode=None,
+                result={},
+                artifacts=[],
+                errors=[],
+                log_tail="",
+                cancel_requested=False,
+                message=label or record.stage,
             )
-        return self._describe(dfn_jobs_registry.find(job_id))
+            cancel_event = threading.Event()
+            self._cancel[record.job_id] = cancel_event
+        return self._launch(record.job_id, timeout, cancel_event, wait_seconds)
+
+    # -- record lookup ------------------------------------------------------
+
+    def record(self, job_id: str) -> DfnJobRecord:
+        """Job record from memory, rehydrated from the job directory if needed."""
+        return self._record(job_id)
+
+    def _record(self, job_id: str) -> DfnJobRecord:
+        record = self._record_or_none(job_id)
+        if record is None:
+            raise KeyError(f"unknown dfnWorks job_id {job_id!r}")
+        return record
+
+    def _record_or_none(self, job_id: str) -> DfnJobRecord | None:
+        record = dfn_jobs_registry.get(job_id)
+        if record is not None:
+            return record
+        restored = self._load_from_disk(job_id)
+        if restored is None:
+            return None
+        with self._lock:
+            return dfn_jobs_registry.create(restored)
+
+    @staticmethod
+    def _load_from_disk(job_id: str) -> DfnJobRecord | None:
+        """Rebuild a job record from its directory after an MCP restart."""
+        job_id = str(job_id or "").strip()
+        if not job_id or job_id in (".", "..") or any(
+            sep in job_id for sep in ("/", "\\")
+        ):
+            return None
+        job_dir = settings.dfn_jobs_dir / job_id
+        spec_path = job_dir / "spec.json"
+        if not spec_path.is_file():
+            return None
+        spec = DfnJobRunner._read_result(spec_path)
+        if not spec:
+            return None
+        stage = str(spec.get("stage") or "generate")
+        result_path = job_dir / "result.json"
+        stdout_path = job_dir / "stdout.txt"
+        stderr_path = job_dir / "stderr.txt"
+        result = DfnJobRunner._read_result(result_path)
+        if result:
+            errors = [] if result.get("ok") else [
+                str(result.get("error") or "driver reported failure")
+            ]
+            if result.get("ok"):
+                errors = DfnJobRunner._artifact_errors(job_dir, stage)
+            status = "failed" if errors else "completed"
+            message = errors[0] if errors else str(result.get("message") or "completed")
+            finished_at = DfnJobRunner._mtime_iso(result_path)
+        else:
+            status = "interrupted"
+            errors = ["server restarted before this job wrote result.json"]
+            message = "interrupted; resubmit the same job_id to rerun it"
+            finished_at = None
+        return DfnJobRecord(
+            job_id=job_id,
+            stage=stage,
+            status=status,
+            fingerprint=fingerprint({"stage": stage, "spec": spec}),
+            workspace_dir=str(job_dir),
+            spec_path=str(spec_path),
+            driver_path=str(job_dir / "driver.py"),
+            stdout_path=str(stdout_path),
+            stderr_path=str(stderr_path),
+            result_path=str(result_path),
+            submitted_at=DfnJobRunner._mtime_iso(spec_path) or now_iso(),
+            finished_at=finished_at,
+            result=result,
+            artifacts=DfnJobRunner._list_artifacts(job_dir),
+            errors=errors,
+            log_tail=_tail(stdout_path, 1500),
+            message=message,
+        )
+
+    @staticmethod
+    def _mtime_iso(path: Path) -> str | None:
+        try:
+            stamp = path.stat().st_mtime
+        except OSError:
+            return None
+        return (
+            datetime.fromtimestamp(stamp, timezone.utc)
+            .astimezone()
+            .isoformat(timespec="seconds")
+        )
 
     def _describe(self, record: DfnJobRecord) -> dict[str, Any]:
         result = record.to_dict()
@@ -420,7 +552,7 @@ class DfnJobRunner:
     # -- query / control ----------------------------------------------------
 
     def cancel(self, job_id: str, wait_seconds: float = 5.0) -> dict[str, Any]:
-        record = dfn_jobs_registry.find(job_id)
+        record = self._record(job_id)
         if record.status not in ("queued", "running"):
             return record.to_dict()
         with self._lock:
@@ -442,14 +574,14 @@ class DfnJobRunner:
         return result
 
     def monitor(self, job_id: str, wait_seconds: float = 0.0) -> dict[str, Any]:
-        record = dfn_jobs_registry.find(job_id)
+        record = self._record(job_id)
         if wait_seconds > 0 and record.status in ("queued", "running"):
             dfn_jobs_registry.wait(job_id, wait_seconds)
             record = dfn_jobs_registry.find(job_id)
         return self._describe(record)
 
     def log(self, job_id: str, tail_chars: int = 8000) -> dict[str, Any]:
-        record = dfn_jobs_registry.find(job_id)
+        record = self._record(job_id)
         result = record.to_dict()
         stdout = Path(record.stdout_path) if record.stdout_path else None
         stderr = Path(record.stderr_path) if record.stderr_path else None
@@ -464,7 +596,28 @@ class DfnJobRunner:
         return result
 
     def list(self, limit: int = 20) -> list[dict[str, Any]]:
-        return dfn_jobs_registry.list(limit=limit)
+        """Recent jobs, newest first, including ones from earlier server runs."""
+        limit = max(1, int(limit))
+        seen: dict[str, float] = {}
+        try:
+            job_dirs = [path for path in settings.dfn_jobs_dir.iterdir() if path.is_dir()]
+        except OSError:
+            job_dirs = []
+        for job_dir in job_dirs:
+            try:
+                seen[job_dir.name] = (job_dir / "spec.json").stat().st_mtime
+            except OSError:
+                continue
+        for item in dfn_jobs_registry.list(limit=10_000):
+            seen.setdefault(item["job_id"], 0.0)
+        jobs: list[dict[str, Any]] = []
+        for job_id, _ in sorted(seen.items(), key=lambda item: item[1], reverse=True):
+            if len(jobs) >= limit:
+                break
+            record = self._record_or_none(job_id)
+            if record is not None:
+                jobs.append(self._describe(record))
+        return jobs
 
     # -- environment probe --------------------------------------------------
 

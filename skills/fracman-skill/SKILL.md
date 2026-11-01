@@ -225,6 +225,8 @@ dfnworks_compare(r"C:\path\model.fab", job_id=gen["job_id"])
 ```
 
 - 三个阶段用同一 seed 重建同一 DFN；`job_id` 幂等，重提不同参数会被拒绝。
+- 作业记录随重启从 `<workspace>/dfnworks/jobs/<job_id>/` 恢复；重启时没写出
+  `result.json` 的作业显示 `interrupted`，同 `job_id` 同参数重提即原目录续跑。
 - `result.json` 是唯一可靠判错来源；`dfnworks_job_log` 另外给出 LaGriT
   只在 `run.log` 里的报错。
 - 默认按域尺寸缩放：`h = L/50`、半径 `= L/5`、三组斜交 constant family、

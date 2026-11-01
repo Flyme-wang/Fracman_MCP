@@ -19,12 +19,35 @@ Python module**. Every model change must be expressed as a FracMan macro.
 | --- | --- |
 | Change the project the user is looking at | `run_macro` (live GUI) |
 | Heavy or repeatable generation, no GUI needed | `submit_macro` (batch) |
+| Open-source DFN generation, conforming mesh, connectivity | `dfnworks_generate` / `dfnworks_mesh` / `dfnworks_graph` |
+| Compare a FracMan `.fab/.ffb` with a dfnWorks job | `dfnworks_compare` |
 | Read `.fab/.ffb/.f2d/.sab/.fml/.frd` | `inspect_file` |
 | Screenshot the 3D view | `capture_window` / `get_viewport_image` |
 | Open a project copy | `open_project` |
 
 Live macros are single-flight per session. Batch runs default to 2 concurrent
 processes and are capped by `FRACMAN_MCP_MAX_BATCH`.
+
+## dfnWorks channel
+
+dfnWorks runs inside WSL; the MCP only validates parameters, writes a driver,
+starts a WSL job and parses the JSON it leaves behind.
+
+1. Call `dfnworks_check` first. `ok=false` means fix WSL/venv/LaGriT before
+   submitting anything.
+2. `dfnworks_generate` returns a `job_id`; `dfnworks_mesh` and `dfnworks_graph`
+   accept that id and reuse the same seed, so all three stages describe the
+   same DFN.
+3. `result.json` is the only reliable verdict. `errors` holds the traceback
+   tail. `dfnworks_job_log` shows LaGriT output that never reaches stdout.
+4. Meshing is CPU-heavy; graph is fast. Ask before resubmitting a failed mesh
+   with different parameters — a `job_id` is immutable.
+5. Defaults are scale-relative: `h = domain/50`, fracture radius `= domain/5`,
+   three oblique constant families, `n_poly=100`. That combination was
+   verified to percolate from `left` to `right` on 20 m, 100 m and 1 km cubes.
+   Making `h` coarse relative to the fracture size (`h/radius >= 0.2`) ends in
+   "no intersecting fractures".
+
 
 ## Non-negotiable safety rules
 

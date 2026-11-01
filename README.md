@@ -9,6 +9,7 @@ API、COM 接口或 Python 模块，因此本服务器采用与 Abaqus MCP 类�
 | 实时 GUI 桥 | 改动用户正在看的工程 | 按 PID/HWND 附着窗口，UIA 运行宏、读状态栏/日志、截图 |
 | 隐藏批处理 | 大批量、可重复的生成任务 | 独立 `FracMan.exe` 进程，`LOGTOFILE` + `EXITONERROR`，以 `.fml` 判错 |
 | 文件智能 | 读取结果与宏日志 | 解析 `.fab/.ffb/.f2d/.sab/.fml/.fmf/.frd` |
+| dfnWorks（WSL） | 开源 DFN 生成、共形网格、连通性图、与 FracMan 对比 | 生成作业规格 → 写自带驱动 → `wsl.exe` 调 `/opt/dfnworks-venv` → 读 `result.json` |
 
 服务器仅使用本地 stdio，不监听端口，无 TLS/认证。
 
@@ -25,6 +26,8 @@ mcp_server.py  ── FastMCP tools + resources
         │                      file dialog, screenshots, project launch/close
         ├── runner.py ── hidden batch processes, timeout/cancel, artifact scan
         ├── macro.py ── validation, LOGTOFILE/EXITONERROR wrapping, DFN template
+        ├── dfnworks/ ── spec.py (校验) driver_template.py (Linux 驱动)
+        │                 runner.py (WSL 作业) compare.py (FracMan 对比) paths.py
         └── parsers/ ── FAB FFB F2D SAB FML FMF FRD
 ```
 
@@ -46,6 +49,14 @@ mcp_server.py  ── FastMCP tools + resources
 py -3 -m pip install mcp pywinauto pywin32 psutil Pillow
 py -3 mcp_server.py          # 直接以 stdio 启动
 ```
+
+**dfnWorks 通道（可选）** 另外需要：
+
+- WSL2 Ubuntu，装好 dfnWorks 2.12+ 与其 venv（默认 `/opt/dfnworks-venv`）
+- `~/.dfnworksrc` 设置 `dfnworks_PATH` 与 `LAGRIT_EXE`
+- PFLOTRAN/FEHM 可以不装：本服务器不暴露流动求解工具
+
+自检用 `dfnworks_check`；冷启动导入 `pydfnworks` 约需 1 分钟，默认超时 300 s。
 
 ## 注册到 Qoder
 
@@ -111,6 +122,20 @@ py -3 mcp_server.py          # 直接以 stdio 启动
 | `get_run_log` | 宏日志、stdout/stderr、解析后的错误 |
 | `list_runs` | 最近的批次，新的在前 |
 
+**dfnWorks（WSL，生成/网格/连通性/对比）**
+
+| 工具 | 说明 |
+| --- | --- |
+| `dfnworks_check` | 自检 WSL、`pydfnworks`、仓库、LaGriT、DFNGen |
+| `dfnworks_generate` | 生成 DFN；返回裂缝数、P32、面积/半径/极点、交点、产物 |
+| `dfnworks_mesh` | 对已有作业做 LaGriT 共形网格；`full_mesh.inp` + 节点/三角形统计 |
+| `dfnworks_graph` | 裂缝/交线/二部图，s-t 最短路与 k 条骨干路径 |
+| `dfnworks_compare` | `.fab/.ffb` 与 dfnWorks 统计对比：计数、面积、P32、包围盒 IoU、平均极点夹角 |
+| `dfnworks_job_status` | 状态、产物、错误、日志尾部，可等待 |
+| `dfnworks_job_cancel` | 只终止本作业的 WSL 驱动进程 |
+| `dfnworks_job_log` | stdout/stderr 与 dfnWorks 自身 `run.log` |
+| `dfnworks_list_jobs` | 最近的 dfnWorks 作业 |
+
 **文件与视图**
 
 | 工具 | 说明 |
@@ -128,8 +153,39 @@ py -3 mcp_server.py          # 直接以 stdio 启动
 | `open_project` | 在 MCP 自有窗口中打开工程；默认先复制到工作区 |
 | `close_session` | 关闭 MCP 自有窗口；“保存？”自动答“否” |
 
-**资源**：`fracman://sessions`、`fracman://runs`、`fracman://macro-reference`、
-`fracman://agent-instructions`。
+**资源**：`fracman://sessions`、`fracman://runs`、`fracman://dfnworks-jobs`、
+`fracman://dfnworks-guide`、`fracman://macro-reference`、`fracman://agent-instructions`。
+
+## dfnWorks 通道
+
+FracMan 侧负责建模、宏与结果解读；dfnWorks 侧补上开源、可复现的 DFN 生成、
+LaGriT 共形网格与连通性分析。两者同在一个 stdio 服务器中，`discover_sessions`、
+`inspect_file`、`dfnworks_*` 可混用。
+
+```
+gen = dfnworks_generate(domain=[100,100,100], seed=20261101)
+dfnworks_mesh(gen["job_id"])                     # LaGriT 共形网格
+dfnworks_graph(gen["job_id"], k=10)              # 连通图 + k 条主干
+dfnworks_compare(r"C:\path\model.fab", job_id=gen["job_id"])
+```
+
+`generate` / `mesh` / `graph` 三个阶段都用同一 seed 重建同一 DFN，`job_id` 是幂等键。
+默认几何按域尺寸 `L` 缩放：`h = L/50`、裂缝半径 `= L/5`、三组斜交 constant family、
+`n_poly = 100`、网格 `min_dist = h/4`、`max_dist = 5h`。该组合在 20 m / 100 m / 1 km
+立方域上均实测得到 25 条裂缝、左右边界连通（网格 18,873 节点 / 35,214 三角形，
+耗时约 10 s）。
+
+调参时的两条硬约束：
+
+- `h` 相对裂缝过粗会被 DFNGen 的 FRAM 判掉交点（`h/半径 ≥ 0.2` 时直接报
+  “no intersecting fractures”），生成阶段失败；
+- 矩形 family 的 4 点轮廓最短边必须 ≥ `3h`，否则 `dfnworks_generate` 在提交前
+  就以 `3h meshing limit` 拒绝。
+
+本通道只覆盖几何、网格与连通性；PFLOTRAN/FEHM 流动与 dfnTrans 输运不在范围内，
+需要时应在 WSL 中直接使用 dfnWorks 原始工作流。参数、产物与排错细节见
+[`fracman_mcp/resources/dfnworks_guide.md`](fracman_mcp/resources/dfnworks_guide.md)。
+
 
 ## 安全边界
 
@@ -162,7 +218,13 @@ py -3 mcp_server.py          # 直接以 stdio 启动
   projects\     open_project(copy=True) 的工程副本
   screenshots\  截图
   exports\      默认导出位置
+  dfnworks\
+    jobs\<job_id>\  spec.json、driver.py、run\（DFNGen/LaGriT 工作目录）、
+                    result.json、dfn_stats.json、fractures.json/.csv、
+                    mesh_stats.json、graph.json、graph_metrics.json、backbone.json
 ```
+
+dfnWorks 作业目录必须在带盘符的本地路径下（WSL 通过 `/mnt/<盘符>` 访问，UNC 不支持）。
 
 ## 验收记录（2026-10-31 实测）
 
@@ -180,7 +242,11 @@ py -3 mcp_server.py          # 直接以 stdio 启动
 | 工程生命周期 | Exercise 12e 副本打开 → 截图 → 关闭（“保存？”答“否”）；PID 48136 不受影响 |
 | 实时 DFN | 1 km×1 km×500 m、80 条裂缝；FAB 32,295 B，面积均值 29,697.96 m² |
 | 截图 | 屏幕抓取整窗 2880×1523；3D 视图裁剪 1892×1224；`capture_method=screen` |
-| 单元测试 | `43 passed` |
+| dfnWorks 默认参数 | 20 m 立方域：25 条裂缝、25 个交点、P32 0.158、family 5/9/11 |
+| dfnWorks 网格 | LaGriT 共形网格 10.4 s：18,873 节点、35,214 三角形、25 种材料 |
+| dfnWorks 连通性 | 27 节点、37 边、单连通分量、s-t 连通；k=5 主干 11 节点 14 边 |
+| dfnWorks 对比 | ESF1.fab（另一套 600 m 量级数据）→ 计数/面积/IoU/极点 4 条告警，判定合理 |
+| 单元测试 | `69 passed` |
 
 ## 已知限制
 
@@ -197,6 +263,15 @@ py -3 mcp_server.py          # 直接以 stdio 启动
   拒绝 `STOP`（批处理不受影响）。
 - 不提供 `generate_dfn` / `run_welltest` 之类高层封装；Phase 1 交付宏模板与底层工具。
 - 仅支持 Windows GUI 会话；无远程 HTTP 模式。
+- dfnWorks 通道依赖 WSL2 与独立 venv，冷启动导入 `pydfnworks` 约 1 分钟；默认并发 1 个
+  作业，提交时按 `wait_seconds` 等待，超时只返回 `timeout`，不自动重放。
+- dfnWorks 的 `h`、裂缝半径、`n_poly` 相互耦合：`h` 过粗会丢交点，半径过小或
+  数量不足则主簇不贯穿边界；MCP 只拦截能静态判定的 `3h` 规则，其余需看
+  `result.json` 的 `errors`。
+- 每次 `mesh` / `graph` 都会按 seed 重建 DFN，因此三者耗时相近的只有生成部分；
+  网格阶段仍是主要开销。
+- `dfnworks_compare` 不推断 FracMan set 与 dfnWorks family 的对应关系，只并列统计；
+  域尺寸不一致时 P32/IoU 的差异属于输入差异，不是错误。
 
 ## 目录
 
@@ -205,9 +280,11 @@ MCP/FracMan/
   mcp_server.py
   fracman_mcp/
     config.py models.py requests.py sessions.py gui.py macro.py runner.py
+    dfnworks/ (spec paths runner driver_template compare)
     parsers/ (common fab f2d sab fml frd)
-    resources/ (agent_instructions.md macro_reference.md templates/dfn_generate.fmf)
-  tests/
+    resources/ (agent_instructions.md macro_reference.md dfnworks_guide.md
+                templates/dfn_generate.fmf)
+  tests/ (test_*.py, test_dfnworks.py)
   skills/fracman-skill/
     SKILL.md
     references/ (macro-cookbook.md gui-automation.md troubleshooting.md)

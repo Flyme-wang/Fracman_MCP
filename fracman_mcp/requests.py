@@ -242,5 +242,16 @@ class RunRegistry:
             )
 
 
+class DfnJobRegistry(RunRegistry):
+    """Registry of dfnWorks jobs (same lifecycle as batch runs)."""
+
+    def create(self, record: Any) -> Any:
+        with self._lock:
+            self._runs[record.job_id] = record
+            self._event(record.job_id)
+            return record
+
+
 requests_registry = RequestRegistry()
 runs_registry = RunRegistry()
+dfn_jobs_registry = DfnJobRegistry()

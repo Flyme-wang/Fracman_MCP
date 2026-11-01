@@ -88,3 +88,31 @@ class RunRecord(ModelMixin):
     log_tail: str = ""
     cancel_requested: bool = False
     message: str = ""
+
+
+@dataclass
+class DfnJobRecord(ModelMixin):
+    """One dfnWorks stage executed inside WSL."""
+
+    job_id: str
+    stage: str
+    status: str = "queued"
+    fingerprint: str = ""
+    workspace_dir: str = ""
+    spec_path: str = ""
+    driver_path: str = ""
+    stdout_path: str = ""
+    stderr_path: str = ""
+    result_path: str = ""
+    timeout: float = 7200.0
+    pid: int | None = None
+    submitted_at: str = field(default_factory=now_iso)
+    started_at: str | None = None
+    finished_at: str | None = None
+    returncode: int | None = None
+    result: dict[str, Any] = field(default_factory=dict)
+    artifacts: list[dict[str, Any]] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    log_tail: str = ""
+    cancel_requested: bool = False
+    message: str = ""

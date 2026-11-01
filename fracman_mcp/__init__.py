@@ -1,3 +1,3 @@
-"""FracMan MCP server package (GUI bridge + batch runner + file parsers)."""
+"""FracMan MCP server package (GUI bridge, batch runner, parsers, dfnWorks)."""
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"

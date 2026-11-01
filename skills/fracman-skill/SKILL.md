@@ -1,6 +1,6 @@
 ---
 name: fracman-skill
-description: 通过 FracMan MCP 操作本机 FracMan 8.0 的实战技能，覆盖会话发现与附着、实时/批处理宏、区域与随机裂缝 DFN 建模、FAB/FFB/F2D 导出解析、3D 截图，以及静默宏超时、信息框误判、截图旧帧、单位污染、区域遮挡、会话锁与超时等问题的排查。Use when working with FracMan, DFN, fracture sets, .fab/.fml macros, or the fracman MCP server.
+description: 通过 FracMan MCP 操作本机 FracMan 8.0 与 WSL 内 dfnWorks 的实战技能，覆盖会话发现与附着、实时/批处理宏、区域与随机裂缝 DFN 建模、FAB/FFB/F2D 导出解析、3D 截图、dfnWorks DFN 生成与 LaGriT 共形网格/连通性/对比，以及静默宏超时、信息框误判、截图旧帧、单位污染、区域遮挡、会话锁与超时等问题的排查。Use when working with FracMan, dfnWorks, DFN, fracture sets, .fab/.fml macros, LaGriT meshing, or the fracman MCP server.
 ---
 
 # FracMan Skill
@@ -15,6 +15,7 @@ FracMan 8.00 Beta（2021.02.05，64 bit）上实测过的操作路径与踩坑�
 - 编写或调试 FracMan 宏，尤其是无输出、报错、超时、对话框卡住。
 - 解析 `.fab/.ffb/.f2d/.sab/.fml` 并给出可核验的数字。
 - 无人值守地批量生成裂缝网络或视图。
+- 需要开源 DFN 生成、共形网格或与 FracMan 统计对比时，走 `dfnworks_*`（第 11 节）。
 
 ## 1. 开工 60 秒检查
 
@@ -38,6 +39,8 @@ FracMan 8.00 Beta（2021.02.05，64 bit）上实测过的操作路径与踩坑�
 | 截整窗或 3D 视图 | `capture_window` / `get_viewport_image` | `capture_method=screen` 才可信 |
 | 打开工程副本 | `open_project(copy=true)` | 新进程、不改源文件 |
 | 关闭 MCP 自建会话 | `close_session` | 默认对“保存？”答“否” |
+| 开源 DFN、共形网格、连通性 | `dfnworks_generate` / `dfnworks_mesh` / `dfnworks_graph` | WSL 作业；看 `result.json` |
+| 与 FracMan 结果对比 | `dfnworks_compare` | 计数/面积/P32/IoU/极点夹角 |
 
 实时宏与批处理都能改模型；区别是实时宏占用用户窗口、能截图，批处理不打扰用户但
 无法看到中间画面。生成类任务优先批处理，展示类任务用实时宏。
@@ -205,6 +208,36 @@ END
 报告时给出：对象名、关键参数、裂缝数、包围盒、面积统计、产物路径与大小/哈希、
 截图路径与尺寸。若模型只在实时会话里，注明“工程未保存，`.fab` 是持久产物”。
 没有 `.fml` 与产物双重证据时，不要声称任务成功。
+
+## 11. dfnWorks 通道（WSL）
+
+同一台服务器里还有 9 个 `dfnworks_*` 工具，负责开源 DFN 生成、LaGriT 共形网格、
+连通性图与 FracMan 对比。它们不碰 GUI，与 FracMan 工具可混用。
+
+标准顺序：
+
+```
+dfnworks_check()
+gen = dfnworks_generate(domain=[100,100,100], seed=20261101)
+dfnworks_mesh(gen["job_id"])
+dfnworks_graph(gen["job_id"], k=10)
+dfnworks_compare(r"C:\path\model.fab", job_id=gen["job_id"])
+```
+
+- 三个阶段用同一 seed 重建同一 DFN；`job_id` 幂等，重提不同参数会被拒绝。
+- `result.json` 是唯一可靠判错来源；`dfnworks_job_log` 另外给出 LaGriT
+  只在 `run.log` 里的报错。
+- 默认按域尺寸缩放：`h = L/50`、半径 `= L/5`、三组斜交 constant family、
+  `n_poly = 100`、网格 `h/4` 与 `5h`。20 m / 100 m / 1 km 立方域实测均为
+  25 条裂缝且左右连通。
+- 失败模式先说结论再调参：
+  - `no intersecting fractures`：`h` 相对裂缝太粗（`h/半径 ≥ 0.2`）或半径/数量
+    不足；优先加大半径或减小 `h`，不要先加 `n_poly`。
+  - `3h meshing limit`：正方形 family 4 点轮廓最短边 < `3h`；提高半径或 `aspect`。
+  - `No fractures in the network are in the requested family`：某 family 一条都
+    没留下，且显式给了 `hy_variable`；去掉水力学属性或放宽该 family。
+- 不封装 PFLOTRAN/FEHM 与 dfnTrans；需要流动/输运时改用 WSL 内的 dfnWorks 原始流程。
+- 细节以资源 `fracman://dfnworks-guide` 为准。
 
 ## 参考
 

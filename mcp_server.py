@@ -1,10 +1,12 @@
-"""FracMan 8.0 MCP server.
+"""FracMan 8.0 + dfnWorks MCP server.
 
-Two execution channels, one control plane:
+Three execution channels, one control plane:
 
 * live GUI bridge — runs macros in an already-open FracMan session;
 * batch runner — starts a hidden FracMan process per macro and judges success
   from the generated ``.fml`` log;
+* dfnWorks runner — validates a DFN spec on Windows and executes it with the
+  dfnWorks venv inside WSL (DFNGen, LaGriT meshing, connectivity graph);
 * file intelligence — parses FAB/FFB/F2D/SAB/FML/FRD files.
 
 The MCP itself is local stdio only: no network listener, no authentication.
@@ -22,22 +24,39 @@ from mcp.server.fastmcp import FastMCP
 
 from fracman_mcp import __version__, gui
 from fracman_mcp.config import settings
+from fracman_mcp.dfnworks import (
+    DfnBusy,
+    DfnError,
+    DfnSpecError,
+    build_spec,
+    compare as compare_dfnworks,
+    dfn_runner,
+    merge_spec,
+)
 from fracman_mcp.macro import MacroValidationError
 from fracman_mcp.parsers import SUPPORTED_SUFFIXES, inspect_file as inspect_file_impl
-from fracman_mcp.requests import requests_registry, runs_registry
+from fracman_mcp.requests import dfn_jobs_registry, requests_registry, runs_registry
 from fracman_mcp.runner import BatchBusy, BatchError, batch_runner
 from fracman_mcp.sessions import SessionNotFound, session_manager
 
 INSTRUCTIONS = """\
 FracMan 8.0 has no API. This server controls it through macros, the running GUI,
-and file parsing.
+and file parsing. dfnWorks is exposed through the same server but runs inside
+WSL (DFNGen, LaGriT conforming mesh, connectivity graph); its jobs are validated
+specs executed by a generated driver.
 
-Start with discover_sessions. Use run_macro for the user's live session and
-submit_macro for headless batch work. Judge batch success from the .fml log,
-never from the exit code. request_id/run_id are idempotency keys: after a
-timeout report the unknown outcome and query get_request_status/monitor_run;
-never replay. Live macros reject EXIT and DeleteAll unless explicitly allowed.
-close_session refuses user-owned sessions unless force=true.
+Start FracMan work with discover_sessions. Use run_macro for the user's live
+session and submit_macro for headless batch work. Judge batch success from the
+.fml log, never from the exit code. request_id/run_id are idempotency keys:
+after a timeout report the unknown outcome and query
+get_request_status/monitor_run; never replay. Live macros reject EXIT and
+DeleteAll unless explicitly allowed. close_session refuses user-owned sessions
+unless force=true.
+
+For dfnWorks call dfnworks_check first, then dfnworks_generate; pass its job_id
+to dfnworks_mesh and dfnworks_graph. dfnworks_compare checks a FracMan .fab
+against a dfnWorks job. dfnWorks job ids are idempotency keys too: query status
+instead of resubmitting, and cancel only jobs started by this server.
 """
 
 mcp = FastMCP("wmw-fracman-mcp", instructions=INSTRUCTIONS)
@@ -56,7 +75,15 @@ def _tool(func: Callable[..., Any]) -> Callable[..., Any]:
     async def wrapper(*args: Any, **kwargs: Any) -> str:
         try:
             return await func(*args, **kwargs)
-        except (SessionNotFound, MacroValidationError, BatchBusy, BatchError) as exc:
+        except (
+            SessionNotFound,
+            MacroValidationError,
+            BatchBusy,
+            BatchError,
+            DfnBusy,
+            DfnError,
+            DfnSpecError,
+        ) as exc:
             payload: dict[str, Any] = {
                 "ok": False,
                 "error_type": type(exc).__name__,
@@ -299,6 +326,232 @@ async def list_runs(limit: int = 20) -> str:
 
 
 # ---------------------------------------------------------------------------
+# dfnWorks (WSL) — generation, meshing, connectivity, comparison
+# ---------------------------------------------------------------------------
+
+
+def _job_spec(job_id: str) -> dict[str, Any]:
+    record = dfn_jobs_registry.get(job_id)
+    if record is None:
+        raise KeyError(job_id)
+    spec = json.loads(
+        Path(record.spec_path).read_text(encoding="utf-8", errors="replace")
+    )
+    spec.pop("_run_dir", None)
+    return spec
+
+
+@mcp.tool()
+@_tool
+async def dfnworks_check() -> str:
+    """Probe the WSL dfnWorks install: import, DFNGen, LaGriT, repo paths."""
+    result = await asyncio.to_thread(dfn_runner.check)
+    return _json(result)
+
+
+@mcp.tool()
+@_tool
+async def dfnworks_generate(
+    domain: list[float] | None = None,
+    h: float | None = None,
+    n_poly: int | None = None,
+    seed: int | None = None,
+    families: list[dict[str, Any]] | None = None,
+    stop_condition: int = 0,
+    orientation_option: int = 1,
+    boundary_faces: list[int] | None = None,
+    ncpu: int = 4,
+    output_report: bool = False,
+    job_id: str | None = None,
+    timeout: float | None = None,
+    wait_seconds: float = 60.0,
+) -> str:
+    """Generate a DFN with DFNGen and export fracture statistics.
+
+    ``domain`` is [x, y, z] in metres; ``h`` is the LaGriT target length scale
+    (default max(domain)/50, i.e. 2% of the longest side). With
+    ``stop_condition=0`` fracture counts follow ``n_poly`` and per-family
+    ``probability``; with ``stop_condition=1`` use per-family ``p32``.
+    ``families`` accepts the dfnWorks add_fracture_family keys (shape,
+    distribution, kappa, aspect, trend, plunge, constant, min_radius,
+    max_radius, probability/p32, hy_variable, hy_function, hy_params, ...).
+    Outputs: dfn_stats.json, fractures.json/csv.
+    """
+    spec = await asyncio.to_thread(
+        build_spec,
+        "generate",
+        domain=domain,
+        h=h,
+        n_poly=n_poly,
+        seed=seed,
+        families=families,
+        stop_condition=stop_condition,
+        orientation_option=orientation_option,
+        boundary_faces=boundary_faces,
+        ncpu=ncpu,
+        output_report=output_report,
+    )
+    result = await asyncio.to_thread(
+        dfn_runner.submit,
+        "generate",
+        spec,
+        job_id=job_id,
+        timeout=timeout,
+        wait_seconds=_clamp(wait_seconds, 0.0, 6 * 3600),
+        label="generate",
+    )
+    return _json(result)
+
+
+@mcp.tool()
+@_tool
+async def dfnworks_mesh(
+    job_id: str,
+    uniform_mesh: bool = True,
+    min_dist: float = 0.5,
+    max_dist: float = 10.0,
+    max_resolution_factor: float = 10.0,
+    new_job_id: str | None = None,
+    timeout: float | None = None,
+    wait_seconds: float = 0.0,
+) -> str:
+    """Build a LaGriT conforming mesh from a generated dfnWorks job.
+
+    The source job's specification is reused, so the same seed reproduces the
+    same DFN; the mesh and its statistics are written into the new job
+    directory. Meshing is CPU-heavy and typically the slowest stage.
+    """
+    base = await asyncio.to_thread(_job_spec, job_id)
+    spec = await asyncio.to_thread(
+        merge_spec,
+        base,
+        "mesh",
+        uniform_mesh=uniform_mesh,
+        min_dist=min_dist,
+        max_dist=max_dist,
+        max_resolution_factor=max_resolution_factor,
+    )
+    result = await asyncio.to_thread(
+        dfn_runner.submit,
+        "mesh",
+        spec,
+        job_id=new_job_id,
+        timeout=timeout,
+        wait_seconds=_clamp(wait_seconds, 0.0, 6 * 3600),
+        label=f"mesh from {job_id}",
+    )
+    return _json(result)
+
+
+@mcp.tool()
+@_tool
+async def dfnworks_graph(
+    job_id: str,
+    graph_type: str = "fracture",
+    inflow: str = "left",
+    outflow: str = "right",
+    k: int = 10,
+    new_job_id: str | None = None,
+    timeout: float | None = None,
+    wait_seconds: float = 0.0,
+) -> str:
+    """Build the connectivity graph and k-shortest-path backbone.
+
+    ``graph_type`` is fracture, intersection or bipartite. The graph stage
+    regenerates the same DFN (seed) but does not mesh, so it is much faster
+    than dfnworks_mesh. Outputs: graph.json, graph_metrics.json and, when
+    source and target are connected, backbone.json/backbone_fractures.txt.
+    """
+    base = await asyncio.to_thread(_job_spec, job_id)
+    spec = await asyncio.to_thread(
+        merge_spec,
+        base,
+        "graph",
+        graph_type=graph_type,
+        inflow=inflow,
+        outflow=outflow,
+        k=k,
+    )
+    result = await asyncio.to_thread(
+        dfn_runner.submit,
+        "graph",
+        spec,
+        job_id=new_job_id,
+        timeout=timeout,
+        wait_seconds=_clamp(wait_seconds, 0.0, 6 * 3600),
+        label=f"graph from {job_id}",
+    )
+    return _json(result)
+
+
+@mcp.tool()
+@_tool
+async def dfnworks_compare(
+    fracman_fab: str,
+    job_id: str | None = None,
+    dfnworks_stats: str | None = None,
+    domain: list[float] | None = None,
+) -> str:
+    """Compare a FracMan .fab/.ffb with a dfnWorks job (or a stats JSON).
+
+    Reports count, total/mean area and radius, P32, bbox IoU, mean-pole angle
+    and 2x-threshold warnings. Provide exactly one of job_id or dfnworks_stats.
+    ``domain`` overrides the dfnWorks domain when computing FracMan P32.
+    """
+    if (job_id is None) == (dfnworks_stats is None):
+        raise ValueError("provide exactly one of job_id or dfnworks_stats")
+    source: str
+    if job_id is not None:
+        record = dfn_jobs_registry.get(job_id)
+        if record is None:
+            raise KeyError(job_id)
+        source = record.workspace_dir
+    else:
+        source = str(dfnworks_stats)
+    result = await asyncio.to_thread(
+        compare_dfnworks, fracman_fab, source, domain=domain
+    )
+    return _json(result)
+
+
+@mcp.tool()
+@_tool
+async def dfnworks_job_status(job_id: str, wait_seconds: float = 0.0) -> str:
+    """Show a dfnWorks job's state, statistics and errors; optionally wait."""
+    result = await asyncio.to_thread(
+        dfn_runner.monitor, job_id, _clamp(wait_seconds, 0.0, 6 * 3600)
+    )
+    return _json(result)
+
+
+@mcp.tool()
+@_tool
+async def dfnworks_job_cancel(job_id: str, wait_seconds: float = 5.0) -> str:
+    """Cancel an MCP-owned dfnWorks job (never an unrelated WSL process)."""
+    result = await asyncio.to_thread(
+        dfn_runner.cancel, job_id, _clamp(wait_seconds, 0.0, 120)
+    )
+    return _json(result)
+
+
+@mcp.tool()
+@_tool
+async def dfnworks_job_log(job_id: str, tail_chars: int = 8000) -> str:
+    """Read stdout/stderr and dfnWorks log tails of a job."""
+    result = await asyncio.to_thread(
+        dfn_runner.log, job_id, int(_clamp(tail_chars, 200, 200000))
+    )
+    return _json(result)
+
+
+@mcp.tool()
+@_tool
+async def dfnworks_list_jobs(limit: int = 20) -> str:
+    """List recent dfnWorks jobs, newest first."""
+    return _json({"ok": True, "jobs": dfn_runner.list(limit=int(_clamp(limit, 1, 200)))})
+
+
+# ---------------------------------------------------------------------------
 # Files and views
 # ---------------------------------------------------------------------------
 
@@ -502,6 +755,18 @@ def sessions_resource() -> str:
 def runs_resource() -> str:
     """Recent batch runs as JSON."""
     return _json({"runs": runs_registry.list(limit=50)})
+
+
+@mcp.resource("fracman://dfnworks-jobs")
+def dfnworks_jobs_resource() -> str:
+    """Recent dfnWorks jobs as JSON."""
+    return _json({"jobs": dfn_jobs_registry.list(limit=50)})
+
+
+@mcp.resource("fracman://dfnworks-guide")
+def dfnworks_guide_resource() -> str:
+    """Operating guide for the dfnWorks channel."""
+    return (RESOURCE_DIR / "dfnworks_guide.md").read_text(encoding="utf-8")
 
 
 @mcp.resource("fracman://macro-reference")

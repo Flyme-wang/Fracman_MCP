@@ -44,6 +44,23 @@ class Settings:
         self.batch_timeout = max(10.0, _env_float("FRACMAN_MCP_BATCH_TIMEOUT", 3600.0))
         self.dpi_scale = _env_float("FRACMAN_MCP_DPI_SCALE", 0.0)
         self.log_tail_chars = max(500, _env_int("FRACMAN_MCP_LOG_TAIL", 4000))
+
+        # dfnWorks runs inside WSL; the Windows server only builds job specs and
+        # launches the venv interpreter, so all Linux paths stay configurable.
+        self.wsl_exe = os.environ.get("FRACMAN_WSL_EXE", "wsl.exe")
+        self.wsl_distro = os.environ.get("FRACMAN_WSL_DISTRO", "Ubuntu")
+        self.wsl_user = os.environ.get("FRACMAN_WSL_USER", "wmw")
+        self.dfnworks_venv = os.environ.get(
+            "FRACMAN_DFNWORKS_VENV", "/opt/dfnworks-venv"
+        )
+        self.dfnworks_repo = os.environ.get(
+            "FRACMAN_DFNWORKS_REPO", "/mnt/d/software/dfnWorks"
+        )
+        self.max_dfn_jobs = max(1, _env_int("FRACMAN_MCP_DFN_MAX_JOBS", 1))
+        self.dfn_timeout = max(60.0, _env_float("FRACMAN_MCP_DFN_TIMEOUT", 7200.0))
+        self.dfn_check_timeout = max(
+            30.0, _env_float("FRACMAN_MCP_DFN_CHECK_TIMEOUT", 300.0)
+        )
         self.ensure_dirs()
 
     @property
@@ -62,6 +79,18 @@ class Settings:
     def exports_dir(self) -> Path:
         return self.workspace / "exports"
 
+    @property
+    def dfnworks_dir(self) -> Path:
+        return self.workspace / "dfnworks"
+
+    @property
+    def dfn_jobs_dir(self) -> Path:
+        return self.dfnworks_dir / "jobs"
+
+    @property
+    def dfnworks_python(self) -> str:
+        return f"{self.dfnworks_venv.rstrip('/')}/bin/python"
+
     def ensure_dirs(self) -> None:
         for path in (
             self.workspace,
@@ -69,6 +98,8 @@ class Settings:
             self.projects_dir,
             self.screenshots_dir,
             self.exports_dir,
+            self.dfnworks_dir,
+            self.dfn_jobs_dir,
         ):
             path.mkdir(parents=True, exist_ok=True)
 
@@ -95,6 +126,18 @@ class Settings:
                 "batch_timeout": self.batch_timeout,
                 "dpi_scale": self.dpi_scale,
                 "log_tail_chars": self.log_tail_chars,
+                "dfnworks": {
+                    "wsl_exe": self.wsl_exe,
+                    "wsl_distro": self.wsl_distro,
+                    "wsl_user": self.wsl_user,
+                    "venv": self.dfnworks_venv,
+                    "python": self.dfnworks_python,
+                    "repo": self.dfnworks_repo,
+                    "jobs_dir": str(self.dfn_jobs_dir),
+                    "max_jobs": self.max_dfn_jobs,
+                    "timeout": self.dfn_timeout,
+                    "check_timeout": self.dfn_check_timeout,
+                },
             }
 
 
